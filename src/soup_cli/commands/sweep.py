@@ -588,7 +588,7 @@ def _run_single(base_cfg, params: dict, run_name: str, config_path: Path) -> dic
         load_dataset,
         task_preserves_source_columns,
     )
-    from soup_cli.experiment.tracker import ExperimentTracker
+    from soup_cli.experiment.tracker import ExperimentTracker, generate_run_id
     from soup_cli.monitoring.display import TrainingDisplay
     from soup_cli.trainer.dispatch import build_trainer
     from soup_cli.utils.eval_schedule import loader_data_config, validation_notice
@@ -632,6 +632,13 @@ def _run_single(base_cfg, params: dict, run_name: str, config_path: Path) -> dic
 
     check_judge_rank_budget(cfg, dataset)
 
+    # Native MLX trainers write directly to cfg.output. Allocate a distinct
+    # destination even when a later sweep reuses the same arm names.
+    run_id = None
+    if cfg.backend == "mlx":
+        run_id = generate_run_id()
+        cfg.output = str(Path(cfg.output) / run_id)
+
     # Start tracking
     tracker = ExperimentTracker()
     run_id = tracker.start_run(
@@ -640,6 +647,7 @@ def _run_single(base_cfg, params: dict, run_name: str, config_path: Path) -> dic
         device_name=device_name,
         gpu_info=gpu_info,
         experiment_name=run_name,
+        run_id=run_id,
     )
 
     try:

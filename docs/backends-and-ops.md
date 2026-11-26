@@ -1367,6 +1367,8 @@ soup sweep --config soup.yaml --param lr=1e-5,2e-5,5e-5 --early-stop 1.5
 Every arm builds the trainer `soup train` builds for the config's `task` and
 `backend`, so an arm on a `task: distill` config distills, and an arm on
 `backend: mlx` uses the MLX wrapper.
+Each native MLX sweep arm saves to `<output>/<run_id>`. Use the artifact path
+from that arm's run record to find its adapter and provenance.
 
 
 ## Model Comparison

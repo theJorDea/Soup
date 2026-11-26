@@ -12,6 +12,7 @@ import yaml
 from rich.console import Console
 
 from soup_cli.utils import run_provenance as provenance
+from soup_cli.utils.training_output import training_output_dir
 from tests.conftest import make_cli_runner, strip_ansi
 
 BASE = "owner/base"
@@ -76,14 +77,19 @@ def sweep_cli(tmp_path, monkeypatch):
             if state.failure == "setup":
                 raise RuntimeError("setup failed after base load")
 
-        def train(self, **kwargs):
+        def train(self, *, run_id, **kwargs):
             self.load("training-model")
             self.load("teacher", OTHER)
             if state.failure == "train":
                 raise RuntimeError("training failed after base load")
-            output = Path(self.cfg.output) / self.cfg.experiment_name
-            output.mkdir(parents=True)
-            (output / "receiver.json").write_text(json.dumps(state.calls), encoding="utf-8")
+            output = Path(training_output_dir(
+                self.cfg.output, self.cfg.experiment_name,
+                backend=self.cfg.backend, task=self.cfg.task,
+            ))
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "receiver.json").write_text(json.dumps({
+                "run_id": run_id, "learning_rate": self.cfg.training.lr,
+            }), encoding="utf-8")
             return {"output_dir": str(output), "initial_loss": 1.0, "final_loss": 0.5,
                     "total_steps": 1, "duration_secs": 1.0}
 
@@ -107,6 +113,29 @@ def sweep_cli(tmp_path, monkeypatch):
             tracker.close()
 
     return SimpleNamespace(invoke=invoke, runs=runs, state=state, root=tmp_path)
+
+
+def test_mlx_sweep_preserves_each_arms_artifact_across_invocations(sweep_cli):
+    sweep_cli.state.config["backend"] = "mlx"
+    for grid in ("lr=0.01,0.02", "lr=0.03,0.04"):
+        result = sweep_cli.invoke(param=grid)
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+
+    rows = sweep_cli.runs()
+    assert len(rows) == 4
+    assert len({row["output_dir"] for row in rows}) == 4
+    observed_rates = set()
+    for row in rows:
+        assert row["status"] == "completed"
+        output = sweep_cli.root / row["output_dir"]
+        assert output.parent == sweep_cli.root / "artifacts"
+        assert output.name == row["run_id"]
+        assert Path(json.loads(row["config_json"])["output"]).resolve() == output
+        artifact = json.loads((output / "receiver.json").read_text(encoding="utf-8"))
+        assert artifact["run_id"] == provenance.read_run_provenance(output)["run_id"]
+        assert artifact["run_id"] == row["run_id"]
+        observed_rates.add(artifact["learning_rate"])
+    assert observed_rates == {0.01, 0.02, 0.03, 0.04}
 
 
 @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
