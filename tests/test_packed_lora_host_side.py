@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import types
+from importlib.util import find_spec, module_from_spec
 
 import pytest
 
@@ -396,6 +397,50 @@ def test_park_and_restore_round_trip(pool, monkeypatch, tied):
     assert not tables.any_active()
     assert torch.equal(embed_p.detach(), values[0]) and torch.equal(head_p.detach(), values[1])
     tables.close()
+
+
+@pytest.mark.parametrize("fail_restore", [False, True])
+def test_packed_run_close_releases_host_buffers(fake_cuda, monkeypatch, fail_restore):
+    from soup_cli.kernels import packed_lora
+
+    # Load the real runtime in isolation. Closing a run never invokes Triton kernels.
+    spec = find_spec(f"{packed_lora.__name__}.runtime")
+    runtime = module_from_spec(spec)
+    with monkeypatch.context() as patch:
+        patch.setattr(packed_lora, "model", types.ModuleType("model"), raising=False)
+        spec.loader.exec_module(runtime)
+
+    run = runtime.PackedRun(Policy())
+    stash = run.stash = offload.Stash(1, 16, run.pool)
+    tables = run.tables = hostembed.HostTables(run.pool, tied=False)
+    params = (_table(), _table())
+    original = [param.detach().clone() for param in params]
+    for weight, param in zip(tables.weights(), params, strict=True):
+        weight.host = param.detach().clone()
+        assert run.pool.register(weight.host)
+        assert weight.activate(param)
+    run.device = CPU
+    monkeypatch.setattr(run, "_tables_args", lambda: params)
+    assert len(fake_cuda.locked) == 3
+
+    if fail_restore:
+        def refuse_head(*args):
+            raise RuntimeError("could not restore the head")
+
+        monkeypatch.setattr(tables.head, "restore", refuse_head)
+        with pytest.raises(RuntimeError, match="could not restore the head"):
+            run.close()
+        assert not tables.embed.active and tables.head.active
+    else:
+        run.close()
+        assert not tables.any_active()
+
+    assert not fake_cuda.locked
+    assert not stash.host
+    assert run.closed and run.tables is None and run.stash is None
+    for param, expected in zip(params, original, strict=True):
+        torch.testing.assert_close(param.detach(), expected)
+    run.close()
 
 
 def test_park_can_leave_one_table_where_it_is(pool, monkeypatch):

@@ -28,6 +28,7 @@ The trainer wiring (a hook on the causal LM's ``forward``) lives outside this pa
 """
 
 import os
+from contextlib import ExitStack
 
 import torch
 
@@ -203,17 +204,20 @@ class PackedRun:
 
     # -- end ------------------------------------------------------------------------------------
     def close(self):
-        """Give the pinned host memory back and put every table on the GPU. Safe to call twice."""
+        """Restore the tables and release pinned memory even if restoration fails."""
         if self.closed:
             return
         self.closed = True
-        if self.tables is not None:
-            self.restore_tables()
-            self.tables.close()
-        if self.stash is not None:
-            self.stash.close()
-        self.pool.close()
-        self.stash = self.tables = self.plan = self.packed = None
+        try:
+            with ExitStack() as cleanup:
+                cleanup.callback(self.pool.close)
+                if self.stash is not None:
+                    cleanup.callback(self.stash.close)
+                if self.tables is not None:
+                    cleanup.callback(self.tables.close)
+                    self.restore_tables()
+        finally:
+            self.stash = self.tables = self.plan = self.packed = None
 
 
 def packed_model_layer_bytes(packed, tokens, int8):
